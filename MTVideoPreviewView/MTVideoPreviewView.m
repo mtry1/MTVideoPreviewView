@@ -23,77 +23,92 @@
 @interface MTVideoDecoder : NSObject
 
 @property (nonatomic, weak) id<MTVideoDecoderDelegate>delegate;
+@property (nonatomic, readonly) NSOperationQueue *operationQueue;
 @property (nonatomic, readonly) AVAssetReader *assetReader;
 @property (nonatomic, readonly) AVAssetReaderTrackOutput *readerOutput;
 @property (nonatomic, readonly) AVURLAsset *asset;
+@property (nonatomic, readonly) NSString *urlString;
 @property (nonatomic) BOOL stopDecoding;
 
 @end
 
 @implementation MTVideoDecoder
 
+@synthesize operationQueue = _operationQueue;
 @synthesize assetReader = _assetReader;
 @synthesize readerOutput = _readerOutput;
+@synthesize urlString = _urlString;
+
+- (NSOperationQueue *)operationQueue
+{
+    if(!_operationQueue)
+    {
+        _operationQueue = [[NSOperationQueue alloc] init];
+        _operationQueue.maxConcurrentOperationCount = 1;
+    }
+    return _operationQueue;
+}
 
 - (void)decodeURLString:(NSString *)URLString
 {
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [self onBackgroundThreadDecodeURLString:URLString];
-    });
+    _urlString = URLString;
+    
+    __weak typeof(self)weakSelf = self;
+    NSBlockOperation *operation = [NSBlockOperation blockOperationWithBlock:^{
+        [weakSelf onBackgroundThreadDecode];
+    }];
+    [self.operationQueue addOperation:operation];
 }
 
-- (void)onBackgroundThreadDecodeURLString:(NSString *)URLString
+- (void)onBackgroundThreadDecode
 {
-    @synchronized (self) {
-        self.stopDecoding = NO;
-        
-        NSURL *URL = [NSURL fileURLWithPath:URLString];
-        _asset = [[AVURLAsset alloc] initWithURL:URL options:nil];
-        _assetReader = [[AVAssetReader alloc] initWithAsset:self.asset error:nil];
-        if(!self.assetReader) return;
-        
-        @synchronized (self.assetReader)
+    self.stopDecoding = NO;
+    
+    NSURL *URL = [NSURL fileURLWithPath:self.urlString];
+    _asset = [[AVURLAsset alloc] initWithURL:URL options:nil];
+    _assetReader = [[AVAssetReader alloc] initWithAsset:self.asset error:nil];
+    if(!self.assetReader) return;
+    
+    NSArray *videoTracks = [self.asset tracksWithMediaType:AVMediaTypeVideo];
+    AVAssetTrack *videoTrack = [videoTracks objectAtIndex:0];
+    NSDictionary *outputSettings = @{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA)};
+    _readerOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:outputSettings];
+    if(![self.assetReader canAddOutput:self.readerOutput]) return;
+    
+    [self.assetReader addOutput:self.readerOutput];
+    [self.assetReader startReading];
+    
+    NSTimeInterval minFrameDuration = CMTimeGetSeconds(videoTrack.minFrameDuration);
+    while(!self.stopDecoding && self.assetReader.status == AVAssetReaderStatusReading && videoTrack.nominalFrameRate > 0)
+    {
+        CMSampleBufferRef sampleBuffer = [self.readerOutput copyNextSampleBuffer];
+        if(sampleBuffer)
         {
-            NSArray *videoTracks = [self.asset tracksWithMediaType:AVMediaTypeVideo];
-            AVAssetTrack *videoTrack = [videoTracks objectAtIndex:0];
-            NSDictionary *outputSettings = @{(id)kCVPixelBufferPixelFormatTypeKey:@(kCVPixelFormatType_32BGRA)};
-            _readerOutput = [[AVAssetReaderTrackOutput alloc] initWithTrack:videoTrack outputSettings:outputSettings];
-            if(![self.assetReader canAddOutput:self.readerOutput]) return;
-            
-            [self.assetReader addOutput:self.readerOutput];
-            [self.assetReader startReading];
-            
-            NSTimeInterval minFrameDuration = CMTimeGetSeconds(videoTrack.minFrameDuration);
-            while(!self.stopDecoding && self.assetReader.status == AVAssetReaderStatusReading && videoTrack.nominalFrameRate > 0)
+            CGImageRef imageRef = [self imageFromSampleBufferRef:sampleBuffer];
+            if(imageRef)
             {
-                CMSampleBufferRef sampleBuffer = [self.readerOutput copyNextSampleBuffer];
-                if(sampleBuffer)
-                {
-                    CGImageRef imageRef = [self imageFromSampleBufferRef:sampleBuffer];
-                    if(imageRef)
-                    {
-                        dispatch_async(dispatch_get_main_queue(), ^{
-                            [self.delegate videoDecoder:self progressImageRef:imageRef];
-                            CGImageRelease(imageRef);
-                        });
-                    }
-                    CFRelease(sampleBuffer);
-                }
-                [NSThread sleepForTimeInterval:minFrameDuration];
-            }
-            
-            if(self.assetReader.status != AVAssetReaderStatusCancelled)
-            {
-                [self.assetReader cancelReading];
-            }
-            
-            if(!self.stopDecoding)
-            {
+                __weak typeof(self)weakSelf = self;
                 dispatch_async(dispatch_get_main_queue(), ^{
-                    [self.delegate videoDecoderDidFinished:self];
+                    [weakSelf.delegate videoDecoder:weakSelf progressImageRef:imageRef];
+                    CGImageRelease(imageRef);
                 });
             }
+            CFRelease(sampleBuffer);
         }
+        [NSThread sleepForTimeInterval:minFrameDuration];
+    }
+    
+    if(self.assetReader.status != AVAssetReaderStatusCancelled)
+    {
+        [self.assetReader cancelReading];
+    }
+    
+    if(!self.stopDecoding)
+    {
+        __weak typeof(self)weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [weakSelf.delegate videoDecoderDidFinished:weakSelf];
+        });
     }
 }
 
@@ -123,21 +138,16 @@
 - (void)setStopDecoding:(BOOL)stopDecoding
 {
     _stopDecoding = stopDecoding;
-    if(_stopDecoding && self.assetReader.status == AVAssetReaderStatusReading)
-    {
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            @synchronized (self.assetReader) {
-                [self.assetReader cancelReading];
-            }
-        });
-    }
 }
 
 - (void)dealloc
 {
+    [self.operationQueue cancelAllOperations];
+    
+    self.stopDecoding = YES;
     if(self.assetReader.status == AVAssetReaderStatusReading)
     {
-        self.stopDecoding = YES;
+        [self.assetReader cancelReading];
     }
 }
 
@@ -154,6 +164,7 @@
 @implementation MTVideoPreviewView
 
 @synthesize decoder = _decoder;
+@synthesize playing = _playing;
 
 - (MTVideoDecoder *)decoder
 {
@@ -167,7 +178,7 @@
 
 - (BOOL)isPlaying
 {
-    return !self.decoder.stopDecoding;
+    return _playing;
 }
 
 - (void)start
@@ -177,11 +188,13 @@
         [self stop];
     }
     
+    _playing = YES;
     [self.decoder decodeURLString:self.URLString];
 }
 
 - (void)stop
 {
+    _playing = NO;
     self.decoder.stopDecoding = YES;
 }
 
