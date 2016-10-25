@@ -189,7 +189,7 @@
     }
     
     _playing = YES;
-    [self.decoder decodeURLString:self.URLString];
+    [self.decoder decodeURLString:self.urlString];
 }
 
 - (void)stop

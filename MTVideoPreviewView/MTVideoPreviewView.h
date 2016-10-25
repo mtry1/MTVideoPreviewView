@@ -10,7 +10,7 @@
 
 @interface MTVideoPreviewView : UIView
 
-@property (nonatomic, copy) NSString *URLString;
+@property (nonatomic, copy) NSString *urlString;
 @property (nonatomic, readonly, getter=isPlaying) BOOL playing;
 @property (nonatomic) BOOL repeatPlay;
 

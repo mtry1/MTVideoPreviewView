@@ -79,7 +79,7 @@ static const NSInteger MTMaxFileNameNumber = 5;
     }
     
     MTVideoPreviewView *previewView = [cell.contentView viewWithTag:10086];
-    previewView.URLString = [self videoURLStrings][indexPath.row];
+    previewView.urlString = [self videoURLStrings][indexPath.row];
     [previewView start];
     
     return cell;
